@@ -1,12 +1,33 @@
-// Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine (Ultra-High-Speed Pipeline)
+// Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
+// Features: SDP Bandwidth Uncapping + Zero-Copy Multithreaded Web Worker Pipeline
 import { ICE_SERVERS, CHUNK_SIZE, MAX_CHANNEL_BUFFER, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
+
+// Injects 1 Gbps bandwidth directives (b=AS & b=TIAS) into SDP media blocks
+function uncapSdpBandwidth(sdp) {
+  if (!sdp) return sdp;
+  const lines = sdp.split(/\r\n|\r|\n/);
+  const modified = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    modified.push(line);
+
+    // Inject bandwidth modifiers immediately following the application media descriptor
+    if (line.startsWith('m=application')) {
+      modified.push('b=AS:1048576'); // 1 Gbps Application Specific bandwidth (in kbps)
+      modified.push('b=TIAS:1073741824'); // 1 Gbps Transport-Independent bandwidth (in bps)
+    }
+  }
+
+  return modified.join('\r\n') + '\r\n';
+}
 
 export class WebRTCEngine {
   constructor(options = {}) {
     this.options = options;
     this.peerConnection = null;
-    this.dataChannels = []; // Pool of parallel WebRTC data channels
+    this.dataChannels = []; // Pool of 8 parallel WebRTC data channels
     this.isConnected = false;
     this.remotePeerId = null;
 
@@ -115,7 +136,9 @@ export class WebRTCEngine {
     this.initPeerConnection();
     this.createParallelDataChannels();
 
-    const offer = await this.peerConnection.createOffer();
+    const rawOffer = await this.peerConnection.createOffer();
+    const uncappedSdp = uncapSdpBandwidth(rawOffer.sdp);
+    const offer = new RTCSessionDescription({ type: rawOffer.type, sdp: uncappedSdp });
     await this.peerConnection.setLocalDescription(offer);
     return offer;
   }
@@ -125,7 +148,8 @@ export class WebRTCEngine {
       this.initPeerConnection();
     }
     const pc = this.peerConnection;
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const uncappedOffer = new RTCSessionDescription({ type: offer.type, sdp: uncapSdpBandwidth(offer.sdp) });
+    await pc.setRemoteDescription(uncappedOffer);
     
     // Drain queued ICE candidates
     while (this.pendingCandidates.length > 0) {
@@ -135,7 +159,9 @@ export class WebRTCEngine {
       } catch (e) {}
     }
 
-    const answer = await pc.createAnswer();
+    const rawAnswer = await pc.createAnswer();
+    const uncappedAnswerSdp = uncapSdpBandwidth(rawAnswer.sdp);
+    const answer = new RTCSessionDescription({ type: rawAnswer.type, sdp: uncappedAnswerSdp });
     await pc.setLocalDescription(answer);
     return answer;
   }
@@ -143,7 +169,8 @@ export class WebRTCEngine {
   async handleAnswer(answer) {
     if (!this.peerConnection) return;
     const pc = this.peerConnection;
-    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    const uncappedAnswer = new RTCSessionDescription({ type: answer.type, sdp: uncapSdpBandwidth(answer.sdp) });
+    await pc.setRemoteDescription(uncappedAnswer);
 
     // Drain queued ICE candidates
     while (this.pendingCandidates.length > 0) {
@@ -316,7 +343,7 @@ export class WebRTCEngine {
     return this.dataChannels.find(ch => ch.readyState === 'open');
   }
 
-  // Ultra-High-Speed Decoupled Multi-Worker Producer-Consumer Pipeline
+  // Ultra-High-Speed Decoupled Web Worker Streaming Sender
   async sendFile(file) {
     const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
     if (openChannels.length === 0) {
@@ -351,62 +378,56 @@ export class WebRTCEngine {
       status: 'transferring'
     });
 
-    // Bounded Async Pre-fetch Queue (holds up to 64 formatted packets in RAM)
-    const MAX_QUEUE_SIZE = 64;
+    // In-Memory Packet Queue populated by Background Worker
     const packetQueue = [];
-    let isReadingComplete = false;
-    let readError = null;
-
-    let resolveProducer = null;
+    let isWorkerFinished = false;
+    let workerError = null;
     let resolveConsumer = null;
 
-    // Background Producer: Fast Asynchronous Stream/Slice Pre-Reader
-    (async () => {
-      try {
-        let chunkIndex = 0;
-        let offset = 0;
+    // Instantiate Background Web Worker for multithreaded chunk slicing
+    const worker = new Worker(new URL('./transfer.worker.js', import.meta.url), { type: 'module' });
 
-        while (offset < file.size) {
-          // Pause producer if buffer queue is full
-          while (packetQueue.length >= MAX_QUEUE_SIZE) {
-            await new Promise(r => { resolveProducer = r; });
-          }
-
-          const length = Math.min(CHUNK_SIZE, file.size - offset);
-          const rawBuffer = await file.slice(offset, offset + length).arrayBuffer();
-
-          // Pre-pack with 4-byte chunk index prefix
-          const packet = new Uint8Array(4 + rawBuffer.byteLength);
-          new DataView(packet.buffer).setUint32(0, chunkIndex, false);
-          packet.set(new Uint8Array(rawBuffer), 4);
-
-          packetQueue.push({
-            buffer: packet.buffer,
-            payloadLength: rawBuffer.byteLength,
-            index: chunkIndex
-          });
-
-          offset += length;
-          chunkIndex++;
-
-          // Wake waiting consumers
-          if (resolveConsumer) {
-            const cb = resolveConsumer;
-            resolveConsumer = null;
-            cb();
-          }
+    worker.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'chunk') {
+        packetQueue.push(msg);
+        if (resolveConsumer) {
+          const cb = resolveConsumer;
+          resolveConsumer = null;
+          cb();
         }
-      } catch (err) {
-        readError = err;
-      } finally {
-        isReadingComplete = true;
+      } else if (msg.type === 'complete') {
+        isWorkerFinished = true;
+        if (resolveConsumer) {
+          const cb = resolveConsumer;
+          resolveConsumer = null;
+          cb();
+        }
+      } else if (msg.type === 'error') {
+        workerError = new Error(msg.error);
         if (resolveConsumer) {
           const cb = resolveConsumer;
           resolveConsumer = null;
           cb();
         }
       }
-    })();
+    };
+
+    worker.onerror = (err) => {
+      workerError = err;
+      if (resolveConsumer) {
+        const cb = resolveConsumer;
+        resolveConsumer = null;
+        cb();
+      }
+    };
+
+    // Kick off background worker processing
+    worker.postMessage({
+      file,
+      chunkSize: CHUNK_SIZE,
+      fileId
+    });
 
     let totalBytesSent = 0;
     let sentChunksCount = 0;
@@ -443,10 +464,10 @@ export class WebRTCEngine {
       }
     };
 
-    // Parallel Independent Channel Workers
+    // Parallel Independent Channel Workers (Zero Lockstep Stalls)
     const channelWorker = async (channel) => {
       while (sentChunksCount < totalChunks) {
-        if (readError) throw readError;
+        if (workerError) throw workerError;
         if (channel.readyState !== 'open') break;
 
         // Per-Channel Non-Blocking Backpressure Check
@@ -459,24 +480,17 @@ export class WebRTCEngine {
           });
         }
 
-        // Fetch next pre-read packet from queue
-        while (packetQueue.length === 0 && !isReadingComplete) {
+        // Wait for next packet from background worker
+        while (packetQueue.length === 0 && !isWorkerFinished) {
           await new Promise(r => { resolveConsumer = r; });
         }
 
-        if (packetQueue.length === 0 && isReadingComplete) {
-          break; // All packets produced and sent
+        if (packetQueue.length === 0 && isWorkerFinished) {
+          break; // All chunks processed
         }
 
         const item = packetQueue.shift();
         if (!item) continue;
-
-        // Wake producer if space freed up in queue
-        if (resolveProducer && packetQueue.length < MAX_QUEUE_SIZE / 2) {
-          const cb = resolveProducer;
-          resolveProducer = null;
-          cb();
-        }
 
         channel.send(item.buffer);
         totalBytesSent += item.payloadLength;
@@ -486,10 +500,12 @@ export class WebRTCEngine {
       }
     };
 
-    // Launch all channel workers simultaneously!
+    // Blast chunks simultaneously across all 8 channels!
     await Promise.all(openChannels.map(ch => channelWorker(ch)));
 
-    if (readError) throw readError;
+    worker.terminate();
+
+    if (workerError) throw workerError;
 
     playSentSound();
 
