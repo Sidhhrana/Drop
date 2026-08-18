@@ -1,5 +1,5 @@
 // Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
-// Burst-Pumping 16MB Block Slicer + Zero-Copy Pipeline
+// Direct 4MB Block Slicer + Multi-Channel Round-Robin Pump + Smooth Continuous Pacing
 import { ICE_SERVERS, CHUNK_SIZE, MAX_CHANNEL_BUFFER, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
 
@@ -58,14 +58,14 @@ export class WebRTCEngine {
     return this.peerConnection;
   }
 
-  // Pre-negotiated symmetric channels (eliminates DCEP in-band negotiation lag)
+  // Pre-negotiated symmetric channels with reliable lossless delivery
   createParallelDataChannels() {
     this.dataChannels = [];
     for (let i = 0; i < PARALLEL_CHANNELS; i++) {
       const channel = this.peerConnection.createDataChannel(`drop-lane-${i}`, {
         negotiated: true,
         id: i,
-        ordered: false
+        ordered: true
       });
       this.setupDataChannel(channel);
     }
@@ -73,7 +73,16 @@ export class WebRTCEngine {
 
   setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
-    channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4); // 2 MB low watermark
+    channel.bufferedAmountLowThreshold = 256 * 1024; // 256 KB low watermark
+    channel._drainResolvers = [];
+
+    // Permanent onbufferedamountlow listener
+    channel.onbufferedamountlow = () => {
+      while (channel._drainResolvers && channel._drainResolvers.length > 0) {
+        const resolve = channel._drainResolvers.shift();
+        resolve();
+      }
+    };
 
     if (!this.dataChannels.includes(channel)) {
       this.dataChannels.push(channel);
@@ -250,8 +259,8 @@ export class WebRTCEngine {
     const now = Date.now();
     const timeDelta = (now - file.lastUpdateTime) / 1000;
 
-    // Throttled UI progress updates (150ms)
-    if (timeDelta > 0.15 || file.receivedCount >= file.totalChunks) {
+    // Smooth UI progress updates (120ms)
+    if (timeDelta > 0.12 || file.receivedCount >= file.totalChunks) {
       const bytesDelta = file.receivedBytes - file.lastBytes;
       const currentSpeedBytes = timeDelta > 0 ? (bytesDelta / timeDelta) : 0;
       file.currentSpeed = currentSpeedBytes / (1024 * 1024);
@@ -313,15 +322,15 @@ export class WebRTCEngine {
     return this.dataChannels.find(ch => ch.readyState === 'open');
   }
 
-  // Ultra-High-Speed Decoupled Web Worker Streaming Sender
+  // Direct 4MB In-Memory Block Streaming Engine (Zero Worker IPC Overhead)
   async sendFile(file) {
-    const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
-    if (openChannels.length === 0) {
-      throw new Error('No active transfer channels available');
-    }
-
     const fileId = Math.random().toString(36).substring(2, 9);
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+    const openChannel = this.getAvailableChannel();
+    if (!openChannel) {
+      throw new Error('No active transfer channels available');
+    }
 
     // 1. Broadcast file metadata header across primary channel
     const meta = {
@@ -333,7 +342,7 @@ export class WebRTCEngine {
       totalChunks,
       chunkSize: CHUNK_SIZE
     };
-    openChannels[0].send(JSON.stringify(meta));
+    openChannel.send(JSON.stringify(meta));
 
     this.onFileProgress({
       id: fileId,
@@ -348,50 +357,10 @@ export class WebRTCEngine {
       status: 'transferring'
     });
 
-    // In-Memory Packet Queue populated by Background Worker
-    const packetQueue = [];
-    let isWorkerFinished = false;
-    let workerError = null;
-    const waitingConsumers = [];
-
-    const notifyConsumers = () => {
-      while (waitingConsumers.length > 0) {
-        const resolve = waitingConsumers.shift();
-        resolve();
-      }
-    };
-
-    // Instantiate Background Web Worker for 16MB block-buffered chunk slicing
-    const worker = new Worker(new URL('./transfer.worker.js', import.meta.url), { type: 'module' });
-
-    worker.onmessage = (e) => {
-      const msg = e.data;
-      if (msg.type === 'chunk') {
-        packetQueue.push(msg);
-        notifyConsumers();
-      } else if (msg.type === 'complete') {
-        isWorkerFinished = true;
-        notifyConsumers();
-      } else if (msg.type === 'error') {
-        workerError = new Error(msg.error);
-        notifyConsumers();
-      }
-    };
-
-    worker.onerror = (err) => {
-      workerError = err;
-      notifyConsumers();
-    };
-
-    // Kick off background worker processing
-    worker.postMessage({
-      file,
-      chunkSize: CHUNK_SIZE,
-      fileId
-    });
-
+    const BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB fast memory blocks
+    let fileOffset = 0;
+    let chunkIndex = 0;
     let totalBytesSent = 0;
-    let sentChunksCount = 0;
     let lastUpdateTime = Date.now();
     let lastBytes = 0;
 
@@ -399,13 +368,13 @@ export class WebRTCEngine {
       const now = Date.now();
       const timeDelta = (now - lastUpdateTime) / 1000;
 
-      if (timeDelta > 0.15 || sentChunksCount >= totalChunks) {
+      if (timeDelta > 0.12 || chunkIndex >= totalChunks) {
         const bytesDelta = totalBytesSent - lastBytes;
         const currentSpeedBytes = timeDelta > 0 ? (bytesDelta / timeDelta) : 0;
         const speedMBps = currentSpeedBytes / (1024 * 1024);
         const remainingBytes = file.size - totalBytesSent;
         const etaSeconds = currentSpeedBytes > 0 ? Math.ceil(remainingBytes / currentSpeedBytes) : 0;
-        const percent = Math.min(100, Math.round((sentChunksCount / totalChunks) * 100));
+        const percent = Math.min(100, Math.round((chunkIndex / totalChunks) * 100));
 
         lastUpdateTime = now;
         lastBytes = totalBytesSent;
@@ -420,57 +389,69 @@ export class WebRTCEngine {
           speedMBps: parseFloat(speedMBps.toFixed(2)),
           etaSeconds,
           direction: 'upload',
-          status: sentChunksCount >= totalChunks ? 'completed' : 'transferring'
+          status: chunkIndex >= totalChunks ? 'completed' : 'transferring'
         });
       }
     };
 
-    // High-Throughput Burst Channel Workers
-    const channelWorker = async (channel) => {
-      while (sentChunksCount < totalChunks) {
-        if (workerError) throw workerError;
-        if (channel.readyState !== 'open') break;
+    const waitForChannelDrain = (channel) => {
+      if (channel.bufferedAmount <= channel.bufferedAmountLowThreshold) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        channel._drainResolvers.push(resolve);
+        setTimeout(() => {
+          const idx = channel._drainResolvers.indexOf(resolve);
+          if (idx !== -1) {
+            channel._drainResolvers.splice(idx, 1);
+            resolve();
+          }
+        }, 50);
+      });
+    };
 
-        // Per-Channel Non-Blocking Backpressure Check
+    // Round-robin channel pump across all open channels
+    let activeChannelIdx = 0;
+
+    while (fileOffset < file.size) {
+      const blockLength = Math.min(BLOCK_SIZE, file.size - fileOffset);
+      const blockBuffer = await file.slice(fileOffset, fileOffset + blockLength).arrayBuffer();
+      const blockBytes = new Uint8Array(blockBuffer);
+
+      let blockOffset = 0;
+      while (blockOffset < blockLength) {
+        const payloadLength = Math.min(CHUNK_SIZE, blockLength - blockOffset);
+
+        const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
+        if (openChannels.length === 0) throw new Error('Transfer interrupted: channels closed');
+        
+        const channel = openChannels[activeChannelIdx % openChannels.length];
+        activeChannelIdx++;
+
+        // Smooth backpressure check
         if (channel.bufferedAmount > MAX_CHANNEL_BUFFER) {
-          await new Promise((resolve) => {
-            channel.onbufferedamountlow = () => {
-              channel.onbufferedamountlow = null;
-              resolve();
-            };
-          });
+          await waitForChannelDrain(channel);
         }
 
-        // Wait for next packet from background worker
-        while (packetQueue.length === 0 && !isWorkerFinished && !workerError) {
-          await new Promise(r => waitingConsumers.push(r));
-        }
+        // Pack 4-byte chunk index prefix + binary payload
+        const packet = new Uint8Array(4 + payloadLength);
+        new DataView(packet.buffer).setUint32(0, chunkIndex, false);
+        packet.set(blockBytes.subarray(blockOffset, blockOffset + payloadLength), 4);
 
-        if (packetQueue.length === 0 && isWorkerFinished) {
-          break; // All chunks processed
-        }
-
-        // Send a burst of up to 4 chunks per loop turn to saturate socket without event loop delay
-        let burst = 0;
-        while (burst < 4 && packetQueue.length > 0 && channel.bufferedAmount < MAX_CHANNEL_BUFFER) {
-          const item = packetQueue.shift();
-          if (!item) break;
-          channel.send(item.buffer);
-          totalBytesSent += item.payloadLength;
-          sentChunksCount++;
-          burst++;
-        }
+        channel.send(packet.buffer);
+        totalBytesSent += payloadLength;
+        chunkIndex++;
+        blockOffset += payloadLength;
 
         updateProgress();
       }
-    };
 
-    // Blast chunks simultaneously across all parallel channels!
-    await Promise.all(openChannels.map(ch => channelWorker(ch)));
+      fileOffset += blockLength;
+    }
 
-    worker.terminate();
-
-    if (workerError) throw workerError;
+    // Drain all in-flight buffers
+    const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
+    await Promise.all(openChannels.map(ch => waitForChannelDrain(ch)));
 
     playSentSound();
 

@@ -1,23 +1,25 @@
-// High-Throughput Background Web Worker: 16 MB Block-Buffered Fast Disk Slicer
-// Slices in 16MB RAM blocks to eliminate disk IPC latency bottlenecks
+// High-Throughput Batch Block Slicer Web Worker
+// Slices 4MB disk blocks into arrays of 16 pre-indexed transferable packets
 
 self.onmessage = async (e) => {
   const { file, chunkSize, fileId } = e.data;
   if (!file) return;
 
   try {
-    const BLOCK_SIZE = 16 * 1024 * 1024; // 16 MB block read from disk
+    const BLOCK_SIZE = 4 * 1024 * 1024; // 4 MB block read
     const totalChunks = Math.ceil(file.size / chunkSize);
     let chunkIndex = 0;
     let fileOffset = 0;
 
     while (fileOffset < file.size) {
-      // 1. Read 16 MB block from disk into RAM in a single fast I/O operation
       const blockLength = Math.min(BLOCK_SIZE, file.size - fileOffset);
       const blockBuffer = await file.slice(fileOffset, fileOffset + blockLength).arrayBuffer();
       const blockBytes = new Uint8Array(blockBuffer);
 
       let blockOffset = 0;
+      const batch = [];
+      const transferList = [];
+
       while (blockOffset < blockLength) {
         const payloadLength = Math.min(chunkSize, blockLength - blockOffset);
         
@@ -26,17 +28,28 @@ self.onmessage = async (e) => {
         new DataView(packet.buffer).setUint32(0, chunkIndex, false);
         packet.set(blockBytes.subarray(blockOffset, blockOffset + payloadLength), 4);
 
-        // Transfer ownership of ArrayBuffer to the main thread with ZERO COPY!
-        self.postMessage({
-          type: 'chunk',
-          fileId,
+        batch.push({
           chunkIndex,
           payloadLength,
           buffer: packet.buffer
-        }, [packet.buffer]);
+        });
+        transferList.push(packet.buffer);
 
         blockOffset += payloadLength;
         chunkIndex++;
+
+        // Send in batches of 16 chunks to eliminate postMessage IPC overhead
+        if (batch.length >= 16 || blockOffset >= blockLength) {
+          const toSend = batch.slice();
+          const toTransfer = transferList.slice();
+          batch.length = 0;
+          transferList.length = 0;
+          self.postMessage({
+            type: 'chunk-batch',
+            fileId,
+            chunks: toSend
+          }, toTransfer);
+        }
       }
 
       fileOffset += blockLength;
