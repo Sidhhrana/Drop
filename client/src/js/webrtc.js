@@ -1,5 +1,5 @@
 // Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
-// 100% Reliable Pre-Negotiated Parallel Channels + 16MB Block Slicer + Zero-Copy Pipeline
+// Burst-Pumping 16MB Block Slicer + Zero-Copy Pipeline
 import { ICE_SERVERS, CHUNK_SIZE, MAX_CHANNEL_BUFFER, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
 
@@ -73,7 +73,7 @@ export class WebRTCEngine {
 
   setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
-    channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4); // 2 MB watermark
+    channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4); // 2 MB low watermark
 
     if (!this.dataChannels.includes(channel)) {
       this.dataChannels.push(channel);
@@ -425,7 +425,7 @@ export class WebRTCEngine {
       }
     };
 
-    // Parallel Independent Channel Workers (Zero Lockstep Stalls)
+    // High-Throughput Burst Channel Workers
     const channelWorker = async (channel) => {
       while (sentChunksCount < totalChunks) {
         if (workerError) throw workerError;
@@ -450,18 +450,22 @@ export class WebRTCEngine {
           break; // All chunks processed
         }
 
-        const item = packetQueue.shift();
-        if (!item) continue;
-
-        channel.send(item.buffer);
-        totalBytesSent += item.payloadLength;
-        sentChunksCount++;
+        // Send a burst of up to 4 chunks per loop turn to saturate socket without event loop delay
+        let burst = 0;
+        while (burst < 4 && packetQueue.length > 0 && channel.bufferedAmount < MAX_CHANNEL_BUFFER) {
+          const item = packetQueue.shift();
+          if (!item) break;
+          channel.send(item.buffer);
+          totalBytesSent += item.payloadLength;
+          sentChunksCount++;
+          burst++;
+        }
 
         updateProgress();
       }
     };
 
-    // Blast chunks simultaneously across all 8 channels!
+    // Blast chunks simultaneously across all parallel channels!
     await Promise.all(openChannels.map(ch => channelWorker(ch)));
 
     worker.terminate();
