@@ -266,7 +266,7 @@ export class WebRTCEngine {
     }
   }
 
-  // Outgoing File Transfer with Backpressure Flow Control
+  // Outgoing File Transfer with High-Performance Backpressure Flow Control
   async sendFile(file) {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
       throw new Error('Transfer channel is not connected');
@@ -300,23 +300,16 @@ export class WebRTCEngine {
     });
 
     let offset = 0;
-    let chunkIndex = 0;
-    const startTime = Date.now();
     let lastUpdateTime = Date.now();
     let lastBytes = 0;
 
-    const readChunk = (start, length) => {
-      return new Promise((resolve, reject) => {
-        const slice = file.slice(start, start + length);
-        const reader = new FileReader();
-        reader.onload = (e) => resolve(e.target.result);
-        reader.onerror = (e) => reject(e);
-        reader.readAsArrayBuffer(slice);
-      });
-    };
-
+    // High-speed pump loop
     while (offset < file.size) {
-      // Flow Control Backpressure: if buffer is full, wait for buffer to drain
+      if (this.dataChannel.readyState !== 'open') {
+        throw new Error('Connection lost during file transfer');
+      }
+
+      // Check if SCTP buffer is saturated; if so, wait for drain event
       if (this.dataChannel.bufferedAmount > BUFFER_THRESHOLD) {
         await new Promise((resolve) => {
           this.dataChannel.onbufferedamountlow = () => {
@@ -326,21 +319,18 @@ export class WebRTCEngine {
         });
       }
 
-      if (this.dataChannel.readyState !== 'open') {
-        throw new Error('Connection lost during file transfer');
-      }
-
       const length = Math.min(CHUNK_SIZE, file.size - offset);
-      const chunkBuffer = await readChunk(offset, length);
+      // Native Blob.arrayBuffer() - Fast multithreaded browser C++ memory extraction
+      const chunkBuffer = await file.slice(offset, offset + length).arrayBuffer();
       this.dataChannel.send(chunkBuffer);
 
       offset += length;
-      chunkIndex++;
 
       const now = Date.now();
       const timeDelta = (now - lastUpdateTime) / 1000;
 
-      if (timeDelta > 0.25 || offset >= file.size) {
+      // Throttle UI updates to ~150ms to keep main thread free for max throughput
+      if (timeDelta > 0.15 || offset >= file.size) {
         const bytesDelta = offset - lastBytes;
         const currentSpeedBytes = timeDelta > 0 ? (bytesDelta / timeDelta) : 0;
         const speedMBps = currentSpeedBytes / (1024 * 1024);
