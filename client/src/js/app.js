@@ -108,12 +108,21 @@ export function showToast(message, duration = 3000) {
 let signaling = null;
 let webrtc = null;
 let localP2P = null;
+let isHost = false;
 
 function initEngines() {
   // WebRTC Instance
   webrtc = new WebRTCEngine({
     onStateChange: (state) => {
       updateConnectionStatus(state);
+      if (state === 'connected' && webrtc.dataChannels[0]) {
+        try {
+          webrtc.dataChannels[0].send(JSON.stringify({
+            type: 'peer-intro',
+            name: getStoredDeviceName()
+          }));
+        } catch (e) {}
+      }
     },
     onIceCandidate: (candidate, targetPeerId) => {
       if (currentMode === 'remote' && signaling && signaling.isConnected) {
@@ -121,6 +130,12 @@ function initEngines() {
       }
     },
     onTextMessage: (msg) => {
+      if (msg.type === 'peer-intro' && msg.name) {
+        currentPeerName = msg.name;
+        const nameEl = document.getElementById('connected-peer-name');
+        if (nameEl) nameEl.textContent = currentPeerName;
+        return;
+      }
       renderReceivedText(msg.text, msg.timestamp);
       showToast('New text received');
     },
@@ -153,21 +168,25 @@ function initEngines() {
       updateStatusText('Signaling disconnected');
     },
     onRoomCreated: (roomId) => {
-      showRoomActive(roomId);
+      isHost = true;
+      showRoomActive(roomId, true);
       showToast(`Room ${roomId} created`);
     },
     onRoomJoined: (roomId, existingPeers) => {
-      showRoomActive(roomId);
+      isHost = false;
+      showRoomActive(roomId, false);
       showToast(`Joined room ${roomId}`);
-      // If there's an existing peer waiting, initiate the WebRTC offer!
+      // Joiner initiates the WebRTC offer (Host waits, preventing glare collision!)
       if (existingPeers && existingPeers.length > 0) {
+        updateStatusText('Connecting to host...', 'waiting');
         initiateWebRtcConnection(existingPeers[0]);
       }
     },
     onPeerJoined: (peerId) => {
       showToast(`Peer joined the room! Connecting...`);
-      updateStatusText('Connecting to peer...');
-      initiateWebRtcConnection(peerId);
+      updateStatusText('Connecting to peer...', 'waiting');
+      webrtc.remotePeerId = peerId;
+      // Host stays ready to receive the joiner's offer without double-offering
     },
     onPeerLeft: (peerId) => {
       showToast(`Peer disconnected`);
@@ -227,19 +246,29 @@ function updateConnectionStatus(state) {
     if (banner) banner.style.display = 'flex';
     if (connectedPeerName) connectedPeerName.textContent = currentPeerName;
   } else {
-    updateStatusText(signaling && signaling.roomId ? `Waiting in room ${signaling.roomId}` : 'Ready to share');
+    updateStatusText(signaling && signaling.roomId ? `Room ${signaling.roomId}` : 'Ready to share');
     if (banner) banner.style.display = 'none';
   }
 }
 
-function showRoomActive(roomId) {
+function showRoomActive(roomId, asHost = true) {
   document.getElementById('room-init-view').style.display = 'none';
   document.getElementById('room-active-view').style.display = 'flex';
   document.getElementById('active-room-code').textContent = roomId;
-  updateStatusText(`Waiting for peer in room ${roomId}...`, 'waiting');
 
-  // Update URL hash for easy sharing
-  window.location.hash = `room=${roomId}`;
+  const hintEl = document.getElementById('room-hint-text');
+  if (hintEl) {
+    hintEl.textContent = asHost 
+      ? 'Share this 6-digit room code with the other device:' 
+      : `Joined room ${roomId}. Connecting to host...`;
+  }
+
+  updateStatusText(asHost ? `Waiting for peer in room ${roomId}...` : `Connecting in room ${roomId}...`, 'waiting');
+
+  // Only update URL hash if host created the room
+  if (asHost) {
+    window.location.hash = `room=${roomId}`;
+  }
 }
 
 function showRoomInit() {

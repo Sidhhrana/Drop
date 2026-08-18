@@ -21,6 +21,7 @@ export class WebRTCEngine {
     // Incoming file state
     this.incomingFiles = new Map();
     this.currentReceivingFileId = null;
+    this.pendingCandidates = [];
   }
 
   initPeerConnection() {
@@ -32,6 +33,7 @@ export class WebRTCEngine {
     };
 
     this.peerConnection = new RTCPeerConnection(config);
+    this.pendingCandidates = [];
 
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
@@ -51,6 +53,7 @@ export class WebRTCEngine {
     };
 
     this.peerConnection.ondatachannel = (event) => {
+      console.log(`[WebRTC] Remote channel received: ${event.channel.label}`);
       this.setupDataChannel(event.channel);
     };
 
@@ -118,24 +121,50 @@ export class WebRTCEngine {
   }
 
   async handleOffer(offer) {
-    this.initPeerConnection();
-    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await this.peerConnection.createAnswer();
-    await this.peerConnection.setLocalDescription(answer);
+    if (!this.peerConnection) {
+      this.initPeerConnection();
+    }
+    const pc = this.peerConnection;
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    
+    // Drain queued ICE candidates
+    while (this.pendingCandidates.length > 0) {
+      const cand = this.pendingCandidates.shift();
+      try {
+        await pc.addIceCandidate(cand);
+      } catch (e) {}
+    }
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
     return answer;
   }
 
   async handleAnswer(answer) {
     if (!this.peerConnection) return;
-    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+    const pc = this.peerConnection;
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+    // Drain queued ICE candidates
+    while (this.pendingCandidates.length > 0) {
+      const cand = this.pendingCandidates.shift();
+      try {
+        await pc.addIceCandidate(cand);
+      } catch (e) {}
+    }
   }
 
   async addIceCandidate(candidate) {
-    if (!this.peerConnection) return;
+    if (!candidate) return;
+    const iceCandidate = new RTCIceCandidate(candidate);
+    if (!this.peerConnection || !this.peerConnection.remoteDescription) {
+      this.pendingCandidates.push(iceCandidate);
+      return;
+    }
     try {
-      await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      await this.peerConnection.addIceCandidate(iceCandidate);
     } catch (e) {
-      console.error('[WebRTC] Error adding ICE candidate:', e);
+      console.debug('[WebRTC] Note adding ICE candidate:', e.message);
     }
   }
 
