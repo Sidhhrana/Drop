@@ -1,5 +1,5 @@
 // Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
-// 100% Reliable Pre-Negotiated Parallel Channels + Multithreaded Web Worker
+// 100% Reliable Pre-Negotiated Parallel Channels + 16MB Block Slicer + Zero-Copy Pipeline
 import { ICE_SERVERS, CHUNK_SIZE, MAX_CHANNEL_BUFFER, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
 
@@ -44,7 +44,6 @@ export class WebRTCEngine {
 
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection.connectionState;
-      console.log(`[WebRTC] Connection state: ${state}`);
       if (state === 'connected') {
         this.checkAllChannelsConnected();
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
@@ -66,7 +65,7 @@ export class WebRTCEngine {
       const channel = this.peerConnection.createDataChannel(`drop-lane-${i}`, {
         negotiated: true,
         id: i,
-        ordered: true
+        ordered: false
       });
       this.setupDataChannel(channel);
     }
@@ -74,19 +73,17 @@ export class WebRTCEngine {
 
   setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
-    channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4);
+    channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4); // 2 MB watermark
 
     if (!this.dataChannels.includes(channel)) {
       this.dataChannels.push(channel);
     }
 
     channel.onopen = () => {
-      console.log(`[WebRTC] Lane ${channel.label} OPEN`);
       this.checkAllChannelsConnected();
     };
 
     channel.onclose = () => {
-      console.log(`[WebRTC] Lane ${channel.label} CLOSED`);
       this.checkAllChannelsConnected();
     };
 
@@ -101,15 +98,13 @@ export class WebRTCEngine {
 
   checkAllChannelsConnected() {
     const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
-    console.log(`[WebRTC checkChannels] openChannels count: ${openChannels.length}/${this.dataChannels.length}, isConnected: ${this.isConnected}`);
     if (openChannels.length > 0 && !this.isConnected) {
       this.isConnected = true;
-      console.log('[WebRTC checkChannels] Dispatching onStateChange(connected)');
       this.onStateChange('connected');
       playConnectSound();
+      console.log(`[WebRTC] ${openChannels.length} parallel transfer lanes connected!`);
     } else if (openChannels.length === 0 && this.isConnected) {
       this.isConnected = false;
-      console.log('[WebRTC checkChannels] Dispatching onStateChange(disconnected)');
       this.onStateChange('disconnected');
     }
   }
@@ -209,7 +204,6 @@ export class WebRTCEngine {
 
   // File Reception Handler with Chunk Reassembly
   handleFileStart(meta) {
-    console.log('[WebRTC Receiver] handleFileStart:', meta.name, 'totalChunks:', meta.totalChunks, 'size:', meta.size);
     this.incomingFiles.set(meta.id, {
       ...meta,
       chunks: new Array(meta.totalChunks),
@@ -239,16 +233,13 @@ export class WebRTCEngine {
 
   handleParallelFileChunk(arrayBuffer) {
     const fileId = this.currentReceivingFileId;
-    if (!fileId || !this.incomingFiles.has(fileId)) {
-      console.warn('[WebRTC Receiver] Received chunk but no currentReceivingFileId or missing fileId:', fileId);
-      return;
-    }
+    if (!fileId || !this.incomingFiles.has(fileId)) return;
 
     const file = this.incomingFiles.get(fileId);
 
     // Extract 4-byte chunk index prefix
     const chunkIndex = new DataView(arrayBuffer, 0, 4).getUint32(0, false);
-    const chunkData = arrayBuffer.slice(4);
+    const chunkData = new Uint8Array(arrayBuffer, 4); // Zero-copy view
 
     if (!file.chunks[chunkIndex]) {
       file.chunks[chunkIndex] = chunkData;
@@ -287,7 +278,6 @@ export class WebRTCEngine {
 
     // When all parallel chunks are received
     if (file.receivedCount >= file.totalChunks) {
-      console.log('[WebRTC Receiver] All chunks received! Assembling Blob for:', file.name);
       const completeBlob = new Blob(file.chunks, { type: file.mimeType || 'application/octet-stream' });
       const downloadUrl = URL.createObjectURL(completeBlob);
 
@@ -371,7 +361,7 @@ export class WebRTCEngine {
       }
     };
 
-    // Instantiate Background Web Worker for multithreaded chunk slicing
+    // Instantiate Background Web Worker for 16MB block-buffered chunk slicing
     const worker = new Worker(new URL('./transfer.worker.js', import.meta.url), { type: 'module' });
 
     worker.onmessage = (e) => {

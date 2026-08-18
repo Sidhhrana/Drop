@@ -1,35 +1,45 @@
-// Background Web Worker for Zero-Copy Chunk Slicing and Packaging
-// Runs on a separate CPU core to eliminate main-thread Garbage Collection and UI lag
+// High-Throughput Background Web Worker: 16 MB Block-Buffered Fast Disk Slicer
+// Slices in 16MB RAM blocks to eliminate disk IPC latency bottlenecks
 
 self.onmessage = async (e) => {
   const { file, chunkSize, fileId } = e.data;
   if (!file) return;
 
   try {
-    let offset = 0;
-    let chunkIndex = 0;
+    const BLOCK_SIZE = 16 * 1024 * 1024; // 16 MB block read from disk
     const totalChunks = Math.ceil(file.size / chunkSize);
+    let chunkIndex = 0;
+    let fileOffset = 0;
 
-    while (offset < file.size) {
-      const length = Math.min(chunkSize, file.size - offset);
-      const rawBuffer = await file.slice(offset, offset + length).arrayBuffer();
+    while (fileOffset < file.size) {
+      // 1. Read 16 MB block from disk into RAM in a single fast I/O operation
+      const blockLength = Math.min(BLOCK_SIZE, file.size - fileOffset);
+      const blockBuffer = await file.slice(fileOffset, fileOffset + blockLength).arrayBuffer();
+      const blockBytes = new Uint8Array(blockBuffer);
 
-      // Pack 4-byte chunk index prefix + binary payload
-      const packet = new Uint8Array(4 + rawBuffer.byteLength);
-      new DataView(packet.buffer).setUint32(0, chunkIndex, false);
-      packet.set(new Uint8Array(rawBuffer), 4);
+      let blockOffset = 0;
+      while (blockOffset < blockLength) {
+        const payloadLength = Math.min(chunkSize, blockLength - blockOffset);
+        
+        // Pack 4-byte chunk index prefix + binary payload
+        const packet = new Uint8Array(4 + payloadLength);
+        new DataView(packet.buffer).setUint32(0, chunkIndex, false);
+        packet.set(blockBytes.subarray(blockOffset, blockOffset + payloadLength), 4);
 
-      // Transfer ownership of ArrayBuffer to the main thread with ZERO COPY!
-      self.postMessage({
-        type: 'chunk',
-        fileId,
-        chunkIndex,
-        payloadLength: rawBuffer.byteLength,
-        buffer: packet.buffer
-      }, [packet.buffer]);
+        // Transfer ownership of ArrayBuffer to the main thread with ZERO COPY!
+        self.postMessage({
+          type: 'chunk',
+          fileId,
+          chunkIndex,
+          payloadLength,
+          buffer: packet.buffer
+        }, [packet.buffer]);
 
-      offset += length;
-      chunkIndex++;
+        blockOffset += payloadLength;
+        chunkIndex++;
+      }
+
+      fileOffset += blockLength;
     }
 
     self.postMessage({
