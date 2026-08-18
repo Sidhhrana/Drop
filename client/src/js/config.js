@@ -17,6 +17,6 @@ export const DEFAULT_SIGNALING_URL =
     ? 'ws://localhost:3001'
     : RENDER_WS_URL;
 
-export const PARALLEL_CHANNELS = 8; // 8 concurrent WebRTC data channels for parallel chunk striping
-export const CHUNK_SIZE = 128 * 1024; // 128 KB per chunk
-export const BUFFER_THRESHOLD = 1024 * 1024; // 1 MB backpressure threshold per channel
+export const PARALLEL_CHANNELS = 8; // 8 independent asynchronous WebRTC data lanes
+export const CHUNK_SIZE = 64 * 1024 - 4; // 65,532 bytes (Payload fits cleanly in single unfragmented SCTP packet with 4B index)
+export const MAX_CHANNEL_BUFFER = 2 * 1024 * 1024; // 2 MB continuous in-flight buffer per channel (16 MB total pipeline)

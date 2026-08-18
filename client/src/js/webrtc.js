@@ -1,5 +1,5 @@
-// Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
-import { ICE_SERVERS, CHUNK_SIZE, BUFFER_THRESHOLD, PARALLEL_CHANNELS } from './config.js';
+// Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine (Ultra-High-Speed Pipeline)
+import { ICE_SERVERS, CHUNK_SIZE, MAX_CHANNEL_BUFFER, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
 
 export class WebRTCEngine {
@@ -73,7 +73,7 @@ export class WebRTCEngine {
 
   setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
-    channel.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
+    channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4);
 
     if (!this.dataChannels.includes(channel)) {
       this.dataChannels.push(channel);
@@ -316,7 +316,7 @@ export class WebRTCEngine {
     return this.dataChannels.find(ch => ch.readyState === 'open');
   }
 
-  // High-Throughput Parallel Striping Sender
+  // Ultra-High-Speed Decoupled Multi-Worker Producer-Consumer Pipeline
   async sendFile(file) {
     const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
     if (openChannels.length === 0) {
@@ -351,70 +351,145 @@ export class WebRTCEngine {
       status: 'transferring'
     });
 
-    let chunkIndex = 0;
-    let offset = 0;
+    // Bounded Async Pre-fetch Queue (holds up to 64 formatted packets in RAM)
+    const MAX_QUEUE_SIZE = 64;
+    const packetQueue = [];
+    let isReadingComplete = false;
+    let readError = null;
+
+    let resolveProducer = null;
+    let resolveConsumer = null;
+
+    // Background Producer: Fast Asynchronous Stream/Slice Pre-Reader
+    (async () => {
+      try {
+        let chunkIndex = 0;
+        let offset = 0;
+
+        while (offset < file.size) {
+          // Pause producer if buffer queue is full
+          while (packetQueue.length >= MAX_QUEUE_SIZE) {
+            await new Promise(r => { resolveProducer = r; });
+          }
+
+          const length = Math.min(CHUNK_SIZE, file.size - offset);
+          const rawBuffer = await file.slice(offset, offset + length).arrayBuffer();
+
+          // Pre-pack with 4-byte chunk index prefix
+          const packet = new Uint8Array(4 + rawBuffer.byteLength);
+          new DataView(packet.buffer).setUint32(0, chunkIndex, false);
+          packet.set(new Uint8Array(rawBuffer), 4);
+
+          packetQueue.push({
+            buffer: packet.buffer,
+            payloadLength: rawBuffer.byteLength,
+            index: chunkIndex
+          });
+
+          offset += length;
+          chunkIndex++;
+
+          // Wake waiting consumers
+          if (resolveConsumer) {
+            const cb = resolveConsumer;
+            resolveConsumer = null;
+            cb();
+          }
+        }
+      } catch (err) {
+        readError = err;
+      } finally {
+        isReadingComplete = true;
+        if (resolveConsumer) {
+          const cb = resolveConsumer;
+          resolveConsumer = null;
+          cb();
+        }
+      }
+    })();
+
+    let totalBytesSent = 0;
+    let sentChunksCount = 0;
     let lastUpdateTime = Date.now();
     let lastBytes = 0;
 
-    // Parallel lane pump: dispatch chunks across channels concurrently
-    while (chunkIndex < totalChunks) {
-      const channel = openChannels[chunkIndex % openChannels.length];
-
-      if (channel.readyState !== 'open') {
-        throw new Error('Transfer lane disconnected');
-      }
-
-      // Check per-channel backpressure
-      if (channel.bufferedAmount > BUFFER_THRESHOLD) {
-        await new Promise((resolve) => {
-          channel.onbufferedamountlow = () => {
-            channel.onbufferedamountlow = null;
-            resolve();
-          };
-        });
-      }
-
-      const length = Math.min(CHUNK_SIZE, file.size - offset);
-      const rawChunk = await file.slice(offset, offset + length).arrayBuffer();
-
-      // Pack 4-byte chunk index prefix + binary payload
-      const packet = new Uint8Array(4 + rawChunk.byteLength);
-      new DataView(packet.buffer).setUint32(0, chunkIndex, false);
-      packet.set(new Uint8Array(rawChunk), 4);
-
-      channel.send(packet.buffer);
-
-      offset += length;
-      chunkIndex++;
-
+    const updateProgress = () => {
       const now = Date.now();
       const timeDelta = (now - lastUpdateTime) / 1000;
 
-      if (timeDelta > 0.15 || chunkIndex >= totalChunks) {
-        const bytesDelta = offset - lastBytes;
+      if (timeDelta > 0.15 || sentChunksCount >= totalChunks) {
+        const bytesDelta = totalBytesSent - lastBytes;
         const currentSpeedBytes = timeDelta > 0 ? (bytesDelta / timeDelta) : 0;
         const speedMBps = currentSpeedBytes / (1024 * 1024);
-        const remainingBytes = file.size - offset;
+        const remainingBytes = file.size - totalBytesSent;
         const etaSeconds = currentSpeedBytes > 0 ? Math.ceil(remainingBytes / currentSpeedBytes) : 0;
-        const percent = Math.min(100, Math.round((chunkIndex / totalChunks) * 100));
+        const percent = Math.min(100, Math.round((sentChunksCount / totalChunks) * 100));
 
         lastUpdateTime = now;
-        lastBytes = offset;
+        lastBytes = totalBytesSent;
 
         this.onFileProgress({
           id: fileId,
           name: file.name,
           size: file.size,
           mimeType: file.type,
-          receivedBytes: offset,
+          receivedBytes: totalBytesSent,
           percent,
           speedMBps: parseFloat(speedMBps.toFixed(2)),
           etaSeconds,
           direction: 'upload',
-          status: chunkIndex >= totalChunks ? 'completed' : 'transferring'
+          status: sentChunksCount >= totalChunks ? 'completed' : 'transferring'
         });
       }
-    }
+    };
+
+    // Parallel Independent Channel Workers
+    const channelWorker = async (channel) => {
+      while (sentChunksCount < totalChunks) {
+        if (readError) throw readError;
+        if (channel.readyState !== 'open') break;
+
+        // Per-Channel Non-Blocking Backpressure Check
+        if (channel.bufferedAmount > MAX_CHANNEL_BUFFER) {
+          await new Promise((resolve) => {
+            channel.onbufferedamountlow = () => {
+              channel.onbufferedamountlow = null;
+              resolve();
+            };
+          });
+        }
+
+        // Fetch next pre-read packet from queue
+        while (packetQueue.length === 0 && !isReadingComplete) {
+          await new Promise(r => { resolveConsumer = r; });
+        }
+
+        if (packetQueue.length === 0 && isReadingComplete) {
+          break; // All packets produced and sent
+        }
+
+        const item = packetQueue.shift();
+        if (!item) continue;
+
+        // Wake producer if space freed up in queue
+        if (resolveProducer && packetQueue.length < MAX_QUEUE_SIZE / 2) {
+          const cb = resolveProducer;
+          resolveProducer = null;
+          cb();
+        }
+
+        channel.send(item.buffer);
+        totalBytesSent += item.payloadLength;
+        sentChunksCount++;
+
+        updateProgress();
+      }
+    };
+
+    // Launch all channel workers simultaneously!
+    await Promise.all(openChannels.map(ch => channelWorker(ch)));
+
+    if (readError) throw readError;
 
     playSentSound();
 
