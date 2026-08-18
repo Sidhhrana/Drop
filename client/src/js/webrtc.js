@@ -76,6 +76,10 @@ export class WebRTCEngine {
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4);
 
+    if (!this.dataChannels.includes(channel)) {
+      this.dataChannels.push(channel);
+    }
+
     channel.onopen = () => {
       console.log(`[WebRTC] Lane ${channel.label} OPEN`);
       this.checkAllChannelsConnected();
@@ -97,13 +101,15 @@ export class WebRTCEngine {
 
   checkAllChannelsConnected() {
     const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
+    console.log(`[WebRTC checkChannels] openChannels count: ${openChannels.length}/${this.dataChannels.length}, isConnected: ${this.isConnected}`);
     if (openChannels.length > 0 && !this.isConnected) {
       this.isConnected = true;
+      console.log('[WebRTC checkChannels] Dispatching onStateChange(connected)');
       this.onStateChange('connected');
       playConnectSound();
-      console.log(`[WebRTC] ${openChannels.length} parallel transfer lanes connected!`);
     } else if (openChannels.length === 0 && this.isConnected) {
       this.isConnected = false;
+      console.log('[WebRTC checkChannels] Dispatching onStateChange(disconnected)');
       this.onStateChange('disconnected');
     }
   }
@@ -203,6 +209,7 @@ export class WebRTCEngine {
 
   // File Reception Handler with Chunk Reassembly
   handleFileStart(meta) {
+    console.log('[WebRTC Receiver] handleFileStart:', meta.name, 'totalChunks:', meta.totalChunks, 'size:', meta.size);
     this.incomingFiles.set(meta.id, {
       ...meta,
       chunks: new Array(meta.totalChunks),
@@ -232,7 +239,10 @@ export class WebRTCEngine {
 
   handleParallelFileChunk(arrayBuffer) {
     const fileId = this.currentReceivingFileId;
-    if (!fileId || !this.incomingFiles.has(fileId)) return;
+    if (!fileId || !this.incomingFiles.has(fileId)) {
+      console.warn('[WebRTC Receiver] Received chunk but no currentReceivingFileId or missing fileId:', fileId);
+      return;
+    }
 
     const file = this.incomingFiles.get(fileId);
 
@@ -277,6 +287,7 @@ export class WebRTCEngine {
 
     // When all parallel chunks are received
     if (file.receivedCount >= file.totalChunks) {
+      console.log('[WebRTC Receiver] All chunks received! Assembling Blob for:', file.name);
       const completeBlob = new Blob(file.chunks, { type: file.mimeType || 'application/octet-stream' });
       const downloadUrl = URL.createObjectURL(completeBlob);
 
@@ -351,7 +362,14 @@ export class WebRTCEngine {
     const packetQueue = [];
     let isWorkerFinished = false;
     let workerError = null;
-    let resolveConsumer = null;
+    const waitingConsumers = [];
+
+    const notifyConsumers = () => {
+      while (waitingConsumers.length > 0) {
+        const resolve = waitingConsumers.shift();
+        resolve();
+      }
+    };
 
     // Instantiate Background Web Worker for multithreaded chunk slicing
     const worker = new Worker(new URL('./transfer.worker.js', import.meta.url), { type: 'module' });
@@ -360,35 +378,19 @@ export class WebRTCEngine {
       const msg = e.data;
       if (msg.type === 'chunk') {
         packetQueue.push(msg);
-        if (resolveConsumer) {
-          const cb = resolveConsumer;
-          resolveConsumer = null;
-          cb();
-        }
+        notifyConsumers();
       } else if (msg.type === 'complete') {
         isWorkerFinished = true;
-        if (resolveConsumer) {
-          const cb = resolveConsumer;
-          resolveConsumer = null;
-          cb();
-        }
+        notifyConsumers();
       } else if (msg.type === 'error') {
         workerError = new Error(msg.error);
-        if (resolveConsumer) {
-          const cb = resolveConsumer;
-          resolveConsumer = null;
-          cb();
-        }
+        notifyConsumers();
       }
     };
 
     worker.onerror = (err) => {
       workerError = err;
-      if (resolveConsumer) {
-        const cb = resolveConsumer;
-        resolveConsumer = null;
-        cb();
-      }
+      notifyConsumers();
     };
 
     // Kick off background worker processing
@@ -450,8 +452,8 @@ export class WebRTCEngine {
         }
 
         // Wait for next packet from background worker
-        while (packetQueue.length === 0 && !isWorkerFinished) {
-          await new Promise(r => { resolveConsumer = r; });
+        while (packetQueue.length === 0 && !isWorkerFinished && !workerError) {
+          await new Promise(r => waitingConsumers.push(r));
         }
 
         if (packetQueue.length === 0 && isWorkerFinished) {

@@ -114,14 +114,22 @@ function initEngines() {
   // WebRTC Instance
   webrtc = new WebRTCEngine({
     onStateChange: (state) => {
+      console.log('[App UI] WebRTC onStateChange:', state);
       updateConnectionStatus(state);
-      if (state === 'connected' && webrtc.dataChannels[0]) {
-        try {
-          webrtc.dataChannels[0].send(JSON.stringify({
-            type: 'peer-intro',
-            name: getStoredDeviceName()
-          }));
-        } catch (e) {}
+      if (state === 'connected') {
+        const sendIntro = () => {
+          const ch = webrtc.getAvailableChannel();
+          if (ch) {
+            try {
+              ch.send(JSON.stringify({
+                type: 'peer-intro',
+                name: getStoredDeviceName()
+              }));
+            } catch (e) {}
+          }
+        };
+        sendIntro();
+        setTimeout(sendIntro, 500);
       }
     },
     onIceCandidate: (candidate, targetPeerId) => {
@@ -130,6 +138,7 @@ function initEngines() {
       }
     },
     onTextMessage: (msg) => {
+      console.log('[App UI] onTextMessage received:', msg);
       if (msg.type === 'peer-intro' && msg.name) {
         currentPeerName = msg.name;
         const nameEl = document.getElementById('connected-peer-name');
@@ -150,6 +159,8 @@ function initEngines() {
       showToast(`Transfer error: ${err.message || err}`);
     }
   });
+
+  window.webrtc = webrtc;
 
   // Local P2P Instance (Zero Backend)
   localP2P = new LocalP2PManager(webrtc, {
@@ -226,6 +237,10 @@ async function initiateWebRtcConnection(targetPeerId) {
 
 // --- UI Updates ---
 function updateStatusText(text, state = 'default') {
+  console.log('[App UI] updateStatusText called with:', text, state, 'isConnected:', webrtc ? webrtc.isConnected : false);
+  if (webrtc && webrtc.isConnected && state !== 'connected') {
+    return; // Don't let late room events overwrite Connected state!
+  }
   const statusEl = document.getElementById('global-status-text');
   const dotEl = document.getElementById('global-status-dot');
 
@@ -238,6 +253,7 @@ function updateStatusText(text, state = 'default') {
 }
 
 function updateConnectionStatus(state) {
+  console.log('[App UI] updateConnectionStatus called with state:', state);
   const banner = document.getElementById('connected-peer-banner');
   const connectedPeerName = document.getElementById('connected-peer-name');
 

@@ -11,6 +11,7 @@
     "start": "cd server && npm start"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "puppeteer-core": "^25.8.0"
   }
 }
