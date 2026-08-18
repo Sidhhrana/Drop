@@ -1,33 +1,13 @@
 // Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
-// Features: SDP Bandwidth Uncapping + Zero-Copy Multithreaded Web Worker Pipeline
+// 100% Reliable Pre-Negotiated Parallel Channels + Multithreaded Web Worker
 import { ICE_SERVERS, CHUNK_SIZE, MAX_CHANNEL_BUFFER, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
-
-// Injects 1 Gbps bandwidth directives (b=AS & b=TIAS) into SDP media blocks
-function uncapSdpBandwidth(sdp) {
-  if (!sdp) return sdp;
-  const lines = sdp.split(/\r\n|\r|\n/);
-  const modified = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    modified.push(line);
-
-    // Inject bandwidth modifiers immediately following the application media descriptor
-    if (line.startsWith('m=application')) {
-      modified.push('b=AS:1048576'); // 1 Gbps Application Specific bandwidth (in kbps)
-      modified.push('b=TIAS:1073741824'); // 1 Gbps Transport-Independent bandwidth (in bps)
-    }
-  }
-
-  return modified.join('\r\n') + '\r\n';
-}
 
 export class WebRTCEngine {
   constructor(options = {}) {
     this.options = options;
     this.peerConnection = null;
-    this.dataChannels = []; // Pool of 8 parallel WebRTC data channels
+    this.dataChannels = []; // Pre-negotiated parallel WebRTC data channels
     this.isConnected = false;
     this.remotePeerId = null;
 
@@ -73,19 +53,19 @@ export class WebRTCEngine {
       }
     };
 
-    this.peerConnection.ondatachannel = (event) => {
-      console.log(`[WebRTC] Remote channel received: ${event.channel.label}`);
-      this.setupDataChannel(event.channel);
-    };
+    // Pre-negotiate all parallel lanes on both sides (Instant & 100% reliable)
+    this.createParallelDataChannels();
 
     return this.peerConnection;
   }
 
-  // Create parallel data channels pool
+  // Pre-negotiated symmetric channels (eliminates DCEP in-band negotiation lag)
   createParallelDataChannels() {
     this.dataChannels = [];
     for (let i = 0; i < PARALLEL_CHANNELS; i++) {
       const channel = this.peerConnection.createDataChannel(`drop-lane-${i}`, {
+        negotiated: true,
+        id: i,
         ordered: true
       });
       this.setupDataChannel(channel);
@@ -95,10 +75,6 @@ export class WebRTCEngine {
   setupDataChannel(channel) {
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = Math.floor(MAX_CHANNEL_BUFFER / 4);
-
-    if (!this.dataChannels.includes(channel)) {
-      this.dataChannels.push(channel);
-    }
 
     channel.onopen = () => {
       console.log(`[WebRTC] Lane ${channel.label} OPEN`);
@@ -125,7 +101,7 @@ export class WebRTCEngine {
       this.isConnected = true;
       this.onStateChange('connected');
       playConnectSound();
-      console.log(`[WebRTC] ${openChannels.length} parallel transfer lanes active!`);
+      console.log(`[WebRTC] ${openChannels.length} parallel transfer lanes connected!`);
     } else if (openChannels.length === 0 && this.isConnected) {
       this.isConnected = false;
       this.onStateChange('disconnected');
@@ -134,11 +110,8 @@ export class WebRTCEngine {
 
   async createOffer() {
     this.initPeerConnection();
-    this.createParallelDataChannels();
 
-    const rawOffer = await this.peerConnection.createOffer();
-    const uncappedSdp = uncapSdpBandwidth(rawOffer.sdp);
-    const offer = new RTCSessionDescription({ type: rawOffer.type, sdp: uncappedSdp });
+    const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
     return offer;
   }
@@ -148,8 +121,7 @@ export class WebRTCEngine {
       this.initPeerConnection();
     }
     const pc = this.peerConnection;
-    const uncappedOffer = new RTCSessionDescription({ type: offer.type, sdp: uncapSdpBandwidth(offer.sdp) });
-    await pc.setRemoteDescription(uncappedOffer);
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
     
     // Drain queued ICE candidates
     while (this.pendingCandidates.length > 0) {
@@ -159,9 +131,7 @@ export class WebRTCEngine {
       } catch (e) {}
     }
 
-    const rawAnswer = await pc.createAnswer();
-    const uncappedAnswerSdp = uncapSdpBandwidth(rawAnswer.sdp);
-    const answer = new RTCSessionDescription({ type: rawAnswer.type, sdp: uncappedAnswerSdp });
+    const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     return answer;
   }
@@ -169,8 +139,7 @@ export class WebRTCEngine {
   async handleAnswer(answer) {
     if (!this.peerConnection) return;
     const pc = this.peerConnection;
-    const uncappedAnswer = new RTCSessionDescription({ type: answer.type, sdp: uncapSdpBandwidth(answer.sdp) });
-    await pc.setRemoteDescription(uncappedAnswer);
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
 
     // Drain queued ICE candidates
     while (this.pendingCandidates.length > 0) {
