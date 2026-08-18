@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Drop — Minimal Apple-like File & Text Sharing</title>
+  <meta name="description" content="Simple, fast, encrypted peer-to-peer file and text sharing. No accounts, no servers storing your files, 100% direct WebRTC." />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/src/styles/index.css" />
+  <link rel="stylesheet" href="/src/styles/components.css" />
+</head>
+<body>
+  <div class="app-container">
+    <!-- Glass Header Navigation -->
+    <header class="navbar">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2v10m0 0l4-4m-4 4L8 8" />
+            <path d="M20 16a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4" />
+          </svg>
+        </div>
+        <span>Drop</span>
+      </div>
+
+      <!-- Mode Selector -->
+      <div class="mode-segmented-control" role="tablist">
+        <button id="mode-remote-btn" class="mode-btn active" role="tab" aria-selected="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="2" y1="12" x2="22" y2="12" />
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+          </svg>
+          Remote
+        </button>
+        <button id="mode-local-btn" class="mode-btn" role="tab" aria-selected="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+            <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+            <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+            <line x1="12" y1="20" x2="12.01" y2="20" />
+          </svg>
+          Local / Offline
+        </button>
+      </div>
+
+      <!-- Nav Quick Actions -->
+      <div class="nav-actions">
+        <button id="sound-toggle-btn" class="icon-btn" title="Toggle Sound Feedback" aria-label="Toggle Audio">
+          <svg id="sound-icon-on" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+          </svg>
+          <svg id="sound-icon-off" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+            <line x1="23" y1="9" x2="17" y2="15" />
+            <line x1="17" y1="9" x2="23" y2="15" />
+          </svg>
+        </button>
+        <button id="theme-toggle-btn" class="icon-btn" title="Toggle Light/Dark Theme" aria-label="Toggle Theme">
+          <svg id="theme-icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+          <svg id="theme-icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+            <circle cx="12" cy="12" r="5" />
+            <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+            <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+          </svg>
+        </button>
+        <button id="settings-open-btn" class="icon-btn" title="Settings" aria-label="Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- AirDrop Radar & Device Status -->
+    <section class="hero-section">
+      <div class="radar-container">
+        <div class="radar-pulse"></div>
+        <div class="radar-ring"></div>
+        <div class="radar-ring"></div>
+        <div class="radar-ring"></div>
+        <div class="device-avatar" id="device-avatar-btn" title="Click to rename device">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+        </div>
+      </div>
+      <div class="device-name-badge" id="my-device-name">My MacBook Pro</div>
+      <div class="device-status-text">
+        <span class="status-dot" id="global-status-dot"></span>
+        <span id="global-status-text">Ready to share</span>
+      </div>
+    </section>
+
+    <!-- Connected Peer Banner (Appears when paired) -->
+    <div id="connected-peer-banner" class="connected-banner" style="display: none;">
+      <div class="peer-info">
+        <div class="peer-avatar-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="2" width="16" height="20" rx="2" ry="2" />
+            <line x1="12" y1="18" x2="12.01" y2="18" />
+          </svg>
+        </div>
+        <div>
+          <div class="peer-title" id="connected-peer-name">Connected Device</div>
+          <div class="peer-subtitle">Direct WebRTC P2P (Encrypted)</div>
+        </div>
+      </div>
+      <button id="disconnect-peer-btn" class="btn btn-danger-subtle">
+        Disconnect
+      </button>
+    </div>
+
+    <!-- Mode 1: Remote Room Code Card -->
+    <div id="section-remote" class="glass-card">
+      <div class="pairing-container" id="remote-pairing-view">
+        <!-- If in a room -->
+        <div id="room-active-view" class="code-inputs-wrapper" style="display: none;">
+          <span style="font-size: 0.85rem; color: var(--text-secondary);">Share this 6-digit room code to connect:</span>
+          <div class="room-display-badge">
+            <span class="room-code-digits" id="active-room-code">------</span>
+            <button id="copy-code-btn" class="icon-btn" title="Copy code">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+            </button>
+          </div>
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+            <button id="copy-link-btn" class="btn btn-subtle" style="font-size: 0.82rem;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+              </svg>
+              Copy Link
+            </button>
+            <button id="leave-room-btn" class="btn btn-subtle" style="font-size: 0.82rem;">Leave Room</button>
+          </div>
+        </div>
+
+        <!-- If not in a room -->
+        <div id="room-init-view" class="code-inputs-wrapper">
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 1rem; width: 100%;">
+            <button id="create-room-btn" class="btn btn-primary" style="padding: 0.75rem 1.75rem; font-size: 0.95rem;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Create Room Code
+            </button>
+            
+            <div style="display: flex; align-items: center; gap: 0.75rem; width: 100%; max-width: 320px;">
+              <div style="flex: 1; height: 1px; background: var(--border-light);"></div>
+              <span style="font-size: 0.78rem; color: var(--text-tertiary); text-transform: uppercase;">or join existing</span>
+              <div style="flex: 1; height: 1px; background: var(--border-light);"></div>
+            </div>
+
+            <form id="join-room-form" class="join-row">
+              <input type="text" id="join-room-input" class="input-code" placeholder="000000" maxlength="6" pattern="[0-9]{6}" autocomplete="off" required />
+              <button type="submit" class="btn btn-secondary">Join</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mode 2: Offline / Local P2P Card -->
+    <div id="section-local" class="glass-card" style="display: none;">
+      <div class="offline-grid">
+        <!-- Host Offline QR -->
+        <div class="offline-panel">
+          <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 0.35rem;">1. Host Connection</h3>
+          <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.75rem;">Generate an offline pairing QR code</p>
+          
+          <button id="generate-offline-qr-btn" class="btn btn-primary" style="margin-bottom: 0.75rem;">
+            Generate Offline QR
+          </button>
+          
+          <div id="offline-qr-container" style="display: none; flex-direction: column; align-items: center;">
+            <div class="qr-canvas-wrapper">
+              <canvas id="offline-qr-canvas"></canvas>
+            </div>
+            <button id="copy-offline-token-btn" class="btn btn-subtle" style="font-size: 0.78rem;">
+              Copy Pairing Token
+            </button>
+          </div>
+        </div>
+
+        <!-- Join / Scan Offline QR -->
+        <div class="offline-panel">
+          <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 0.35rem;">2. Scan & Connect</h3>
+          <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.75rem;">Scan host QR code or paste pairing token</p>
+          
+          <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+            <button id="open-qr-scanner-btn" class="btn btn-secondary">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                <circle cx="12" cy="13" r="4" />
+              </svg>
+              Scan Camera
+            </button>
+          </div>
+
+          <div style="width: 100%; display: flex; flex-direction: column; gap: 0.5rem;">
+            <textarea id="manual-token-input" placeholder="Paste pairing token here..." rows="3" style="width: 100%; background: var(--bg-input); border: 1px solid var(--border-light); border-radius: var(--radius-md); padding: 0.5rem; font-size: 0.78rem; font-family: monospace;"></textarea>
+            <button id="submit-manual-token-btn" class="btn btn-secondary" style="width: 100%;">Connect via Token</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Transfer Hub (Files & Text Sharing) -->
+    <div id="transfer-hub" class="glass-card">
+      <div class="hub-tabs" role="tablist">
+        <button id="tab-files-btn" class="tab-btn active" role="tab" aria-selected="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+            <polyline points="13 2 13 9 20 9" />
+          </svg>
+          Share Files
+        </button>
+        <button id="tab-text-btn" class="tab-btn" role="tab" aria-selected="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 7 4 4 20 4 20 7" />
+            <line x1="9" y1="20" x2="15" y2="20" />
+            <line x1="12" y1="4" x2="12" y2="20" />
+          </svg>
+          Share Text / Clipboard
+        </button>
+      </div>
+
+      <!-- Files Tab View -->
+      <div id="tab-view-files">
+        <div id="dropzone" class="dropzone" tabindex="0">
+          <input type="file" id="file-picker" multiple style="display: none;" />
+          <div class="dropzone-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+          </div>
+          <div class="dropzone-title">Drop files here to send</div>
+          <div class="dropzone-subtitle">or click to browse files (any size, zero cloud storage)</div>
+        </div>
+      </div>
+
+      <!-- Text Tab View -->
+      <div id="tab-view-text" style="display: none;">
+        <div class="text-pad-container">
+          <textarea id="text-share-input" class="text-pad-input" placeholder="Type or paste text, links, or notes to send instantly to connected device..."></textarea>
+          <div class="text-pad-actions">
+            <span id="char-count-text" style="font-size: 0.78rem; color: var(--text-secondary);">0 characters</span>
+            <div style="display: flex; gap: 0.5rem;">
+              <button id="send-text-btn" class="btn btn-primary">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                </svg>
+                Send Text
+              </button>
+            </div>
+          </div>
+
+          <!-- Received Messages Stream -->
+          <div id="received-text-stream" style="margin-top: 1rem; display: none;">
+            <div style="font-size: 0.82rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.5rem; text-transform: uppercase;">
+              Received Text:
+            </div>
+            <div id="received-text-list" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active & Completed Transfers Queue -->
+      <div id="transfers-section" class="transfers-section" style="display: none;">
+        <div class="transfers-title">Transfers</div>
+        <div id="transfers-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-backdrop">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 class="modal-title">Settings</h2>
+        <button id="settings-close-btn" class="icon-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+        <div>
+          <label style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.35rem;">Device Name</label>
+          <input type="text" id="setting-device-name" class="input-code" style="text-align: left; font-family: inherit; font-size: 0.95rem; width: 100%;" placeholder="e.g. Sid's iPhone" />
+        </div>
+
+        <div>
+          <label style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.35rem;">Signaling Server URL (Render / Cloud)</label>
+          <input type="text" id="setting-server-url" class="input-code" style="text-align: left; font-family: monospace; font-size: 0.85rem; width: 100%;" placeholder="wss://your-render-app.onrender.com" />
+          <p style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.35rem;">
+            Files travel 100% direct peer-to-peer. The server only handles initial 2-second handshakes, keeping Render free tier bandwidth at ~0.
+          </p>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem;">
+          <button id="settings-reset-btn" class="btn btn-subtle">Reset Defaults</button>
+          <button id="settings-save-btn" class="btn btn-primary">Save Changes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- QR Camera Scanner Modal -->
+  <div id="qr-scanner-modal" class="modal-backdrop">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 class="modal-title">Scan Offline QR Code</h2>
+        <button id="qr-scanner-close-btn" class="icon-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+      <div id="qr-reader-container">
+        <div id="qr-reader" style="width: 100%;"></div>
+      </div>
+      <p style="font-size: 0.8rem; color: var(--text-secondary); text-align: center; margin-top: 0.75rem;">
+        Point your camera at the QR code displayed on the other device.
+      </p>
+    </div>
+  </div>
+
+  <!-- iOS-like Floating Toast Alerts -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Application Script -->
+  <script type="module" src="/src/js/app.js"></script>
+</body>
+</html>
