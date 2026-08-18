@@ -1,9 +1,23 @@
-// Main Application Controller for Drop
 import { SignalingClient } from './signaling.js';
 import { WebRTCEngine } from './webrtc.js';
 import { LocalP2PManager } from './local-p2p.js';
 import { toggleSound, isSoundEnabled, playTapSound, playConnectSound, playSentSound, playReceivedSound } from './sounds.js';
-import { DEFAULT_SIGNALING_URL } from './config.js';
+import { DEFAULT_SIGNALING_URL, RENDER_HTTP_URL } from './config.js';
+
+// Auto-wake Render server on page load and periodic keepalive
+function startRenderKeepAlive() {
+  const ping = () => {
+    try {
+      fetch(`${RENDER_HTTP_URL}/health`, { mode: 'no-cors' }).catch(() => {});
+    } catch (e) {}
+  };
+
+  // Immediate wake-up ping
+  ping();
+
+  // Keep-alive heartbeat every 5 minutes while browser tab is open
+  setInterval(ping, 5 * 60 * 1000);
+}
 
 // --- State Management ---
 let currentMode = 'remote'; // 'remote' | 'local'
@@ -409,8 +423,9 @@ document.addEventListener('DOMContentLoaded', () => {
   toggleSound(storedSound);
   updateSoundIcons(storedSound);
 
-  // 4. Initialize Engines
+  // 4. Initialize Engines & Keepalive
   initEngines();
+  startRenderKeepAlive();
 
   // 5. Check URL Hash for Room Code
   const hashMatch = window.location.hash.match(/room=([0-9]{6})/);

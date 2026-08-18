@@ -243,4 +243,29 @@ wss.on('close', () => {
 server.listen(PORT, () => {
   console.log(`✨ Drop Signaling Server running on http://localhost:${PORT}`);
   console.log(`📡 WebSocket ready for ultra-fast P2P handshakes.`);
+
+  // Self-ping keepalive mechanism to prevent Render free-tier from sleeping
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://drop-signaling.onrender.com';
+  const https = require('https');
+  const http = require('http');
+
+  const pingServer = () => {
+    try {
+      const isHttps = RENDER_URL.startsWith('https');
+      const client = isHttps ? https : http;
+      client.get(`${RENDER_URL}/health`, (res) => {
+        console.log(`[KeepAlive] Self-ping status: ${res.statusCode} at ${new Date().toLocaleTimeString()}`);
+      }).on('error', (err) => {
+        console.debug('[KeepAlive] Self-ping note:', err.message);
+      });
+    } catch (e) {
+      console.debug('[KeepAlive] Self-ping note:', e.message);
+    }
+  };
+
+  // Initial ping after 30 seconds, then every 13 minutes
+  setTimeout(() => {
+    pingServer();
+    setInterval(pingServer, 13 * 60 * 1000);
+  }, 30 * 1000);
 });
