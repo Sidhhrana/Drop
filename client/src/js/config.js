@@ -17,5 +17,6 @@ export const DEFAULT_SIGNALING_URL =
     ? 'ws://localhost:3001'
     : RENDER_WS_URL;
 
-export const CHUNK_SIZE = 128 * 1024; // 128 KB per chunk (optimal for high-throughput WebRTC data channels)
-export const BUFFER_THRESHOLD = 1536 * 1024; // 1.5 MB high-speed pipelined backpressure threshold
+export const PARALLEL_CHANNELS = 8; // 8 concurrent WebRTC data channels for parallel chunk striping
+export const CHUNK_SIZE = 128 * 1024; // 128 KB per chunk
+export const BUFFER_THRESHOLD = 1024 * 1024; // 1 MB backpressure threshold per channel

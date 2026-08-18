@@ -1,12 +1,12 @@
-// WebRTC Peer-to-Peer Data Transfer Engine
-import { ICE_SERVERS, CHUNK_SIZE, BUFFER_THRESHOLD } from './config.js';
+// Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
+import { ICE_SERVERS, CHUNK_SIZE, BUFFER_THRESHOLD, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
 
 export class WebRTCEngine {
   constructor(options = {}) {
     this.options = options;
     this.peerConnection = null;
-    this.dataChannel = null;
+    this.dataChannels = []; // Pool of parallel WebRTC data channels
     this.isConnected = false;
     this.remotePeerId = null;
 
@@ -18,12 +18,9 @@ export class WebRTCEngine {
     this.onFileComplete = options.onFileComplete || (() => {});
     this.onError = options.onError || (() => {});
 
-    // Incoming file reception state
-    this.incomingFiles = new Map(); // fileId -> { metadata, chunks: [], receivedBytes: 0, startTime: number, lastUpdateTime: number, lastBytes: 0 }
-    
-    // Outgoing transfer queue
-    this.isSending = false;
-    this.sendQueue = [];
+    // Incoming file state
+    this.incomingFiles = new Map();
+    this.currentReceivingFileId = null;
   }
 
   initPeerConnection() {
@@ -46,64 +43,74 @@ export class WebRTCEngine {
       const state = this.peerConnection.connectionState;
       console.log(`[WebRTC] Connection state: ${state}`);
       if (state === 'connected') {
-        this.isConnected = true;
-        playConnectSound();
+        this.checkAllChannelsConnected();
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
         this.isConnected = false;
+        this.onStateChange('disconnected');
       }
-      this.onStateChange(state);
     };
 
     this.peerConnection.ondatachannel = (event) => {
-      console.log('[WebRTC] Remote DataChannel received');
       this.setupDataChannel(event.channel);
     };
 
     return this.peerConnection;
   }
 
-  createDataChannel(label = 'drop-channel') {
-    if (!this.peerConnection) return null;
-    
-    const channel = this.peerConnection.createDataChannel(label, {
-      ordered: true // Guarantees in-order delivery of chunks
-    });
-    this.setupDataChannel(channel);
-    return channel;
+  // Create parallel data channels pool
+  createParallelDataChannels() {
+    this.dataChannels = [];
+    for (let i = 0; i < PARALLEL_CHANNELS; i++) {
+      const channel = this.peerConnection.createDataChannel(`drop-lane-${i}`, {
+        ordered: true
+      });
+      this.setupDataChannel(channel);
+    }
   }
 
   setupDataChannel(channel) {
-    this.dataChannel = channel;
-    this.dataChannel.binaryType = 'arraybuffer';
-    this.dataChannel.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
+    channel.binaryType = 'arraybuffer';
+    channel.bufferedAmountLowThreshold = BUFFER_THRESHOLD;
 
-    this.dataChannel.onopen = () => {
-      console.log('[WebRTC] DataChannel OPEN and ready for transfer');
-      this.isConnected = true;
-      this.onStateChange('connected');
-      playConnectSound();
+    if (!this.dataChannels.includes(channel)) {
+      this.dataChannels.push(channel);
+    }
+
+    channel.onopen = () => {
+      console.log(`[WebRTC] Lane ${channel.label} OPEN`);
+      this.checkAllChannelsConnected();
     };
 
-    this.dataChannel.onclose = () => {
-      console.log('[WebRTC] DataChannel CLOSED');
-      this.isConnected = false;
-      this.onStateChange('disconnected');
+    channel.onclose = () => {
+      console.log(`[WebRTC] Lane ${channel.label} CLOSED`);
+      this.checkAllChannelsConnected();
     };
 
-    this.dataChannel.onerror = (err) => {
-      console.error('[WebRTC] DataChannel error:', err);
-      this.onError(err);
+    channel.onerror = (err) => {
+      console.error(`[WebRTC] Lane ${channel.label} error:`, err);
     };
 
-    this.dataChannel.onmessage = (event) => {
+    channel.onmessage = (event) => {
       this.handleIncomingMessage(event.data);
     };
   }
 
-  // Handle incoming signaling messages
+  checkAllChannelsConnected() {
+    const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
+    if (openChannels.length > 0 && !this.isConnected) {
+      this.isConnected = true;
+      this.onStateChange('connected');
+      playConnectSound();
+      console.log(`[WebRTC] ${openChannels.length} parallel transfer lanes active!`);
+    } else if (openChannels.length === 0 && this.isConnected) {
+      this.isConnected = false;
+      this.onStateChange('disconnected');
+    }
+  }
+
   async createOffer() {
     this.initPeerConnection();
-    this.createDataChannel();
+    this.createParallelDataChannels();
 
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
@@ -132,7 +139,7 @@ export class WebRTCEngine {
     }
   }
 
-  // Incoming DataChannel router
+  // Incoming Message Router
   handleIncomingMessage(data) {
     if (typeof data === 'string') {
       try {
@@ -146,16 +153,17 @@ export class WebRTCEngine {
           this.handleFileCancel(msg);
         }
       } catch (err) {
-        console.error('[WebRTC] Error parsing JSON message:', err);
+        console.error('[WebRTC] JSON parse error:', err);
       }
     } else if (data instanceof ArrayBuffer) {
-      this.handleFileChunk(data);
+      this.handleParallelFileChunk(data);
     }
   }
 
   sendTextMessage(text) {
-    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-      throw new Error('Transfer channel is not connected');
+    const primaryChannel = this.getAvailableChannel();
+    if (!primaryChannel) {
+      throw new Error('Transfer channels are not connected');
     }
     const payload = {
       type: 'text',
@@ -163,16 +171,17 @@ export class WebRTCEngine {
       text,
       timestamp: Date.now()
     };
-    this.dataChannel.send(JSON.stringify(payload));
+    primaryChannel.send(JSON.stringify(payload));
     playSentSound();
     return payload;
   }
 
-  // File reception handlers
+  // File Reception Handler with Chunk Reassembly
   handleFileStart(meta) {
     this.incomingFiles.set(meta.id, {
       ...meta,
-      chunks: [],
+      chunks: new Array(meta.totalChunks),
+      receivedCount: 0,
       receivedBytes: 0,
       startTime: Date.now(),
       lastUpdateTime: Date.now(),
@@ -196,27 +205,35 @@ export class WebRTCEngine {
     });
   }
 
-  handleFileChunk(arrayBuffer) {
+  handleParallelFileChunk(arrayBuffer) {
     const fileId = this.currentReceivingFileId;
     if (!fileId || !this.incomingFiles.has(fileId)) return;
 
     const file = this.incomingFiles.get(fileId);
-    file.chunks.push(arrayBuffer);
-    file.receivedBytes += arrayBuffer.byteLength;
+
+    // Extract 4-byte chunk index prefix
+    const chunkIndex = new DataView(arrayBuffer, 0, 4).getUint32(0, false);
+    const chunkData = arrayBuffer.slice(4);
+
+    if (!file.chunks[chunkIndex]) {
+      file.chunks[chunkIndex] = chunkData;
+      file.receivedBytes += chunkData.byteLength;
+      file.receivedCount++;
+    }
 
     const now = Date.now();
     const timeDelta = (now - file.lastUpdateTime) / 1000;
-    
-    // Update speed calculation every ~250ms
-    if (timeDelta > 0.25 || file.receivedBytes >= file.size) {
+
+    // Throttled UI progress updates (150ms)
+    if (timeDelta > 0.15 || file.receivedCount >= file.totalChunks) {
       const bytesDelta = file.receivedBytes - file.lastBytes;
-      const currentSpeedBytesPerSec = timeDelta > 0 ? (bytesDelta / timeDelta) : 0;
-      file.currentSpeed = currentSpeedBytesPerSec / (1024 * 1024); // MB/s
+      const currentSpeedBytes = timeDelta > 0 ? (bytesDelta / timeDelta) : 0;
+      file.currentSpeed = currentSpeedBytes / (1024 * 1024);
       file.lastUpdateTime = now;
       file.lastBytes = file.receivedBytes;
 
       const remainingBytes = file.size - file.receivedBytes;
-      const etaSeconds = currentSpeedBytesPerSec > 0 ? Math.ceil(remainingBytes / currentSpeedBytesPerSec) : 0;
+      const etaSeconds = currentSpeedBytes > 0 ? Math.ceil(remainingBytes / currentSpeedBytes) : 0;
       const percent = Math.min(100, Math.round((file.receivedBytes / file.size) * 100));
 
       this.onFileProgress({
@@ -229,15 +246,15 @@ export class WebRTCEngine {
         speedMBps: parseFloat(file.currentSpeed.toFixed(2)),
         etaSeconds,
         direction: 'download',
-        status: file.receivedBytes >= file.size ? 'completed' : 'transferring'
+        status: file.receivedCount >= file.totalChunks ? 'completed' : 'transferring'
       });
     }
 
-    // Check if file is completely received
-    if (file.receivedBytes >= file.size) {
+    // When all parallel chunks are received
+    if (file.receivedCount >= file.totalChunks) {
       const completeBlob = new Blob(file.chunks, { type: file.mimeType || 'application/octet-stream' });
       const downloadUrl = URL.createObjectURL(completeBlob);
-      
+
       playReceivedSound();
 
       this.onFileComplete({
@@ -266,25 +283,31 @@ export class WebRTCEngine {
     }
   }
 
-  // Outgoing File Transfer with High-Performance Backpressure Flow Control
+  getAvailableChannel() {
+    return this.dataChannels.find(ch => ch.readyState === 'open');
+  }
+
+  // High-Throughput Parallel Striping Sender
   async sendFile(file) {
-    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
-      throw new Error('Transfer channel is not connected');
+    const openChannels = this.dataChannels.filter(ch => ch.readyState === 'open');
+    if (openChannels.length === 0) {
+      throw new Error('No active transfer channels available');
     }
 
     const fileId = Math.random().toString(36).substring(2, 9);
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-    // 1. Send file metadata header
+    // 1. Broadcast file metadata header across primary channel
     const meta = {
       type: 'file-start',
       id: fileId,
       name: file.name,
       size: file.size,
       mimeType: file.type || 'application/octet-stream',
-      totalChunks
+      totalChunks,
+      chunkSize: CHUNK_SIZE
     };
-    this.dataChannel.send(JSON.stringify(meta));
+    openChannels[0].send(JSON.stringify(meta));
 
     this.onFileProgress({
       id: fileId,
@@ -299,44 +322,52 @@ export class WebRTCEngine {
       status: 'transferring'
     });
 
+    let chunkIndex = 0;
     let offset = 0;
     let lastUpdateTime = Date.now();
     let lastBytes = 0;
 
-    // High-speed pump loop
-    while (offset < file.size) {
-      if (this.dataChannel.readyState !== 'open') {
-        throw new Error('Connection lost during file transfer');
+    // Parallel lane pump: dispatch chunks across channels concurrently
+    while (chunkIndex < totalChunks) {
+      const channel = openChannels[chunkIndex % openChannels.length];
+
+      if (channel.readyState !== 'open') {
+        throw new Error('Transfer lane disconnected');
       }
 
-      // Check if SCTP buffer is saturated; if so, wait for drain event
-      if (this.dataChannel.bufferedAmount > BUFFER_THRESHOLD) {
+      // Check per-channel backpressure
+      if (channel.bufferedAmount > BUFFER_THRESHOLD) {
         await new Promise((resolve) => {
-          this.dataChannel.onbufferedamountlow = () => {
-            this.dataChannel.onbufferedamountlow = null;
+          channel.onbufferedamountlow = () => {
+            channel.onbufferedamountlow = null;
             resolve();
           };
         });
       }
 
       const length = Math.min(CHUNK_SIZE, file.size - offset);
-      // Native Blob.arrayBuffer() - Fast multithreaded browser C++ memory extraction
-      const chunkBuffer = await file.slice(offset, offset + length).arrayBuffer();
-      this.dataChannel.send(chunkBuffer);
+      const rawChunk = await file.slice(offset, offset + length).arrayBuffer();
+
+      // Pack 4-byte chunk index prefix + binary payload
+      const packet = new Uint8Array(4 + rawChunk.byteLength);
+      new DataView(packet.buffer).setUint32(0, chunkIndex, false);
+      packet.set(new Uint8Array(rawChunk), 4);
+
+      channel.send(packet.buffer);
 
       offset += length;
+      chunkIndex++;
 
       const now = Date.now();
       const timeDelta = (now - lastUpdateTime) / 1000;
 
-      // Throttle UI updates to ~150ms to keep main thread free for max throughput
-      if (timeDelta > 0.15 || offset >= file.size) {
+      if (timeDelta > 0.15 || chunkIndex >= totalChunks) {
         const bytesDelta = offset - lastBytes;
         const currentSpeedBytes = timeDelta > 0 ? (bytesDelta / timeDelta) : 0;
         const speedMBps = currentSpeedBytes / (1024 * 1024);
         const remainingBytes = file.size - offset;
         const etaSeconds = currentSpeedBytes > 0 ? Math.ceil(remainingBytes / currentSpeedBytes) : 0;
-        const percent = Math.min(100, Math.round((offset / file.size) * 100));
+        const percent = Math.min(100, Math.round((chunkIndex / totalChunks) * 100));
 
         lastUpdateTime = now;
         lastBytes = offset;
@@ -351,7 +382,7 @@ export class WebRTCEngine {
           speedMBps: parseFloat(speedMBps.toFixed(2)),
           etaSeconds,
           direction: 'upload',
-          status: offset >= file.size ? 'completed' : 'transferring'
+          status: chunkIndex >= totalChunks ? 'completed' : 'transferring'
         });
       }
     }
@@ -370,10 +401,11 @@ export class WebRTCEngine {
   }
 
   close() {
-    if (this.dataChannel) {
-      try { this.dataChannel.close(); } catch (e) {}
-      this.dataChannel = null;
-    }
+    this.dataChannels.forEach(ch => {
+      try { ch.close(); } catch (e) {}
+    });
+    this.dataChannels = [];
+
     if (this.peerConnection) {
       try { this.peerConnection.close(); } catch (e) {}
       this.peerConnection = null;

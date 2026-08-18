@@ -70,7 +70,7 @@ export class LocalP2PManager {
     this.onStatus('Preparing offline connection token...');
     
     this.webrtc.initPeerConnection();
-    this.webrtc.createDataChannel();
+    this.webrtc.createParallelDataChannels();
 
     return new Promise(async (resolve, reject) => {
       const pc = this.webrtc.peerConnection;
