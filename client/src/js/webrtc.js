@@ -1,5 +1,5 @@
 // Multi-Lane Parallel WebRTC Peer-to-Peer Data Transfer Engine
-// Direct 4MB Block Slicer + Multi-Channel Round-Robin Pump + Smooth Continuous Pacing
+// Dynamic 8-Lane DCEP Negotiation + Direct 4MB In-Memory Block Slicer + Smooth Pacing
 import { ICE_SERVERS, CHUNK_SIZE, MAX_CHANNEL_BUFFER, PARALLEL_CHANNELS } from './config.js';
 import { playConnectSound, playReceivedSound, playSentSound } from './sounds.js';
 
@@ -7,7 +7,7 @@ export class WebRTCEngine {
   constructor(options = {}) {
     this.options = options;
     this.peerConnection = null;
-    this.dataChannels = []; // Pre-negotiated parallel WebRTC data channels
+    this.dataChannels = []; // Multi-lane data channels
     this.isConnected = false;
     this.remotePeerId = null;
 
@@ -35,11 +35,17 @@ export class WebRTCEngine {
 
     this.peerConnection = new RTCPeerConnection(config);
     this.pendingCandidates = [];
+    this.dataChannels = [];
 
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
         this.onIceCandidate(event.candidate, this.remotePeerId);
       }
+    };
+
+    // Answerer receives all parallel channels dynamically
+    this.peerConnection.ondatachannel = (event) => {
+      this.setupDataChannel(event.channel);
     };
 
     this.peerConnection.onconnectionstatechange = () => {
@@ -52,19 +58,14 @@ export class WebRTCEngine {
       }
     };
 
-    // Pre-negotiate all parallel lanes on both sides (Instant & 100% reliable)
-    this.createParallelDataChannels();
-
     return this.peerConnection;
   }
 
-  // Pre-negotiated symmetric channels with reliable lossless delivery
-  createParallelDataChannels() {
+  // Offerer creates the parallel channels
+  createOfferDataChannels() {
     this.dataChannels = [];
     for (let i = 0; i < PARALLEL_CHANNELS; i++) {
       const channel = this.peerConnection.createDataChannel(`drop-lane-${i}`, {
-        negotiated: true,
-        id: i,
         ordered: true
       });
       this.setupDataChannel(channel);
@@ -84,7 +85,7 @@ export class WebRTCEngine {
       }
     };
 
-    if (!this.dataChannels.includes(channel)) {
+    if (!this.dataChannels.some(c => c.label === channel.label)) {
       this.dataChannels.push(channel);
     }
 
@@ -120,6 +121,7 @@ export class WebRTCEngine {
 
   async createOffer() {
     this.initPeerConnection();
+    this.createOfferDataChannels();
 
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
