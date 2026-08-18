@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 const BRAVE_PATH = '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser';
-const APP_URL = 'http://localhost:5180';
+const APP_URL = 'https://drop-p2p.pages.dev';
 
 // Create a 5MB dummy test file in scratch
 const testFilePath = path.resolve('./scratch/test-file-5mb.bin');
@@ -18,6 +18,7 @@ async function testFullTransfer() {
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
   const page1 = await browser1.newPage();
+  await page1.setCacheEnabled(false);
   page1.on('console', msg => console.log('🖥️ [Host]:', msg.type(), msg.text()));
   page1.on('pageerror', err => console.error('❌ [Host PageError]:', err));
 
@@ -27,6 +28,7 @@ async function testFullTransfer() {
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
   const page2 = await browser2.newPage();
+  await page2.setCacheEnabled(false);
   page2.on('console', msg => console.log('📱 [Joiner]:', msg.type(), msg.text()));
   page2.on('pageerror', err => console.error('❌ [Joiner PageError]:', err));
 
@@ -51,15 +53,16 @@ async function testFullTransfer() {
   await page2.click('#join-room-form button[type="submit"]');
 
   // Wait for connection to establish
+  console.log('Waiting for public WebRTC handshake over STUN/Render...');
   await page1.waitForFunction(() => {
     const dot = document.getElementById('global-status-dot');
     return dot && dot.classList.contains('connected');
-  }, { timeout: 10000 });
+  }, { timeout: 30000 });
 
   await page2.waitForFunction(() => {
     const dot = document.getElementById('global-status-dot');
     return dot && dot.classList.contains('connected');
-  }, { timeout: 10000 });
+  }, { timeout: 30000 });
 
   console.log('✅ Both sandboxes are CONNECTED and 8 parallel channels are open!');
 
